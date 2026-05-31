@@ -6,9 +6,19 @@ from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
 from career_intelligence import generate_career_insights
 from huggingface_client import DEFAULT_GEMMA_MODEL, request_chat_completion
+
+REMOTEOK_JOBS_URL = "https://remoteok.com/api"
+STACKEXCHANGE_TAGS_URL = "https://api.stackexchange.com/2.3/tags"
+FALLBACK_JOBS = [
+    {"title": "Senior Data Scientist", "skills": ["Python", "SQL", "MLOps", "ML"]},
+    {"title": "Data Scientist", "skills": ["Python", "Deep Learning", "Communication"]},
+]
+FALLBACK_TRENDS = {"emerging_skills": {"GenAI": 3, "MLOps": 2}}
 
 DASHBOARD_HTML = """<!doctype html>
 <html>
@@ -37,14 +47,7 @@ DASHBOARD_HTML = """<!doctype html>
     <label>Skills (comma-separated)</label>
     <input id=\"skills\" value=\"python, sql, statistics\" />
 
-    <label>Job Postings JSON (array of objects with title + skills)</label>
-    <textarea id=\"jobs\" rows=\"7\">[
-  {"title":"Senior Data Scientist","skills":["Python","SQL","MLOps","ML"]},
-  {"title":"Data Scientist","skills":["Python","Deep Learning","Communication"]}
-]</textarea>
-
-    <label>Trend JSON (object with emerging_skills)</label>
-    <textarea id=\"trends\" rows=\"4\">{"emerging_skills":{"GenAI":3,"MLOps":2}}</textarea>
+    <small>Market jobs and trend data are fetched automatically from open web sources.</small>
 
     <label><input id=\"include_ai\" type=\"checkbox\" checked /> Include Gemma 4 AI recommendation</label>
 
@@ -67,8 +70,7 @@ DASHBOARD_HTML = """<!doctype html>
           target_role: document.getElementById('target_role').value,
           skills: document.getElementById('skills').value.split(',').map(s => s.trim()).filter(Boolean)
         },
-        jobs: JSON.parse(document.getElementById('jobs').value || '[]'),
-        trends: JSON.parse(document.getElementById('trends').value || '{}'),
+        auto_fetch_market_data: true,
         include_ai: document.getElementById('include_ai').checked,
         hf_token: document.getElementById('hf_token').value
       };
@@ -86,6 +88,75 @@ DASHBOARD_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+
+def _fetch_json(url: str, headers: dict[str, str] | None = None, timeout: int = 10) -> Any:
+    request = Request(url, headers=headers or {})
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_open_market_data() -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    warnings: list[str] = []
+
+    jobs: list[dict[str, Any]] = []
+    try:
+        payload = _fetch_json(REMOTEOK_JOBS_URL, headers={"User-Agent": "career-intelligence-dashboard"})
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("position") or item.get("title") or "").strip()
+                tags = item.get("tags")
+                if not title or not isinstance(tags, list):
+                    continue
+                skills = [str(tag).strip() for tag in tags if isinstance(tag, str) and str(tag).strip()]
+                if skills:
+                    jobs.append({"title": title, "skills": skills})
+                if len(jobs) >= 30:
+                    break
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"Unable to fetch jobs from RemoteOK: {exc}")
+    if not jobs:
+        jobs = FALLBACK_JOBS.copy()
+        warnings.append("Using fallback jobs sample data.")
+
+    trends: dict[str, Any] = {}
+    try:
+        term_counts: dict[str, int] = {}
+        for term in ("ai", "machine-learning", "mlops", "data-science"):
+            encoded_term = quote_plus(term)
+            url = (
+                f"{STACKEXCHANGE_TAGS_URL}?order=desc&sort=popular&site=stackoverflow"
+                f"&pagesize=10&inname={encoded_term}"
+            )
+            payload = _fetch_json(url)
+            items = payload.get("items") if isinstance(payload, dict) else []
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                count = item.get("count")
+                if name and isinstance(count, int):
+                    term_counts[name] = max(term_counts.get(name, 0), count)
+
+        ranked = sorted(term_counts.items(), key=lambda pair: pair[1], reverse=True)[:10]
+        if ranked:
+            max_count = ranked[0][1]
+            emerging_skills: dict[str, int] = {}
+            for skill, count in ranked:
+                weight = 1 if max_count <= 0 else max(1, min(5, round((count / max_count) * 5)))
+                emerging_skills[skill] = weight
+            trends = {"emerging_skills": emerging_skills}
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"Unable to fetch trends from Stack Exchange: {exc}")
+    if not trends:
+        trends = FALLBACK_TRENDS.copy()
+        warnings.append("Using fallback trend sample data.")
+
+    return jobs, trends, warnings
 
 
 def _build_ai_messages(profile: dict[str, Any], insights: dict[str, Any]) -> list[dict[str, Any]]:
@@ -108,17 +179,38 @@ def _build_ai_messages(profile: dict[str, Any], insights: dict[str, Any]) -> lis
 def build_dashboard_response(
     payload: dict[str, Any],
     chat_completion_fn=request_chat_completion,
+    market_data_fetcher=fetch_open_market_data,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
     jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
     trends = payload.get("trends") if isinstance(payload.get("trends"), dict) else {}
 
+    warnings: list[str] = []
+    auto_fetch_market_data = bool(payload.get("auto_fetch_market_data", not jobs and not trends))
+    if auto_fetch_market_data:
+        fetched_jobs, fetched_trends, fetch_warnings = market_data_fetcher()
+        warnings.extend(fetch_warnings)
+        if not jobs:
+            jobs = fetched_jobs
+        if not trends:
+            trends = fetched_trends
+
     insights = generate_career_insights(profile=profile, jobs=jobs, trends=trends)
     response: dict[str, Any] = {
         "model": payload.get("model") or DEFAULT_GEMMA_MODEL,
+        "market_data_sources": {
+            "jobs": REMOTEOK_JOBS_URL,
+            "trends": STACKEXCHANGE_TAGS_URL,
+        },
+        "market_data_summary": {
+            "jobs_count": len(jobs),
+            "trend_skills_count": len(trends.get("emerging_skills", {})) if isinstance(trends, dict) else 0,
+        },
         "insights": asdict(insights),
     }
+    if warnings:
+        response["market_data_warnings"] = warnings
 
     if payload.get("include_ai"):
         effective_env = env or os.environ

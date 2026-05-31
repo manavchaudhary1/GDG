@@ -47,12 +47,33 @@ class DashboardResponseTests(unittest.TestCase):
             "jobs": [],
             "trends": {},
             "include_ai": True,
+            "auto_fetch_market_data": False,
         }
 
         response = build_dashboard_response(payload, env={})
 
         self.assertIn("ai_error", response)
         self.assertIn("Missing Hugging Face token", response["ai_error"])
+
+    def test_auto_fetches_market_data_when_inputs_absent(self):
+        payload = {
+            "profile": {"target_role": "Data Scientist", "skills": ["python"]},
+            "include_ai": False,
+        }
+
+        def fake_market_data_fetcher():
+            return (
+                [{"title": "Data Scientist", "skills": ["python", "sql", "genai"]}],
+                {"emerging_skills": {"genai": 5}},
+                [],
+            )
+
+        response = build_dashboard_response(payload, market_data_fetcher=fake_market_data_fetcher)
+
+        self.assertIn("insights", response)
+        self.assertIn("market_data_sources", response)
+        self.assertEqual(response["market_data_summary"]["jobs_count"], 1)
+        self.assertEqual(response["market_data_summary"]["trend_skills_count"], 1)
 
 
 if __name__ == "__main__":
