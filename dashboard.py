@@ -38,7 +38,7 @@ DASHBOARD_HTML = """<!doctype html>
 </head>
 <body>
   <h1>Beyond the Resume: AI Career Intelligence</h1>
-  <p>Run rule-based market intelligence and optional Gemma 4 advice through Hugging Face.</p>
+  <p>Run profile compatibility analysis with optional Gemma 4 advice through Hugging Face.</p>
 
   <div class=\"card\">
     <label>Target Role</label>
@@ -47,7 +47,7 @@ DASHBOARD_HTML = """<!doctype html>
     <label>Skills (comma-separated)</label>
     <input id=\"skills\" value=\"python, sql, statistics\" />
 
-    <small>Market jobs and trend data are fetched automatically from open web sources.</small>
+    <small>Enter your target role and skills to check profile-role compatibility.</small>
 
     <label><input id=\"include_ai\" type=\"checkbox\" checked /> Include Gemma 4 AI recommendation</label>
 
@@ -70,7 +70,6 @@ DASHBOARD_HTML = """<!doctype html>
           target_role: document.getElementById('target_role').value,
           skills: document.getElementById('skills').value.split(',').map(s => s.trim()).filter(Boolean)
         },
-        auto_fetch_market_data: true,
         include_ai: document.getElementById('include_ai').checked,
         hf_token: document.getElementById('hf_token').value
       };
@@ -159,18 +158,21 @@ def fetch_open_market_data() -> tuple[list[dict[str, Any]], dict[str, Any], list
     return jobs, trends, warnings
 
 
-def _build_ai_messages(profile: dict[str, Any], insights: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_ai_messages(profile: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             "role": "system",
-            "content": "You are a practical career advisor. Keep guidance concise, specific, and actionable.",
+            "content": (
+                "You are a practical career advisor. Evaluate compatibility between the candidate profile and "
+                "their target role. Keep guidance concise, specific, and actionable."
+            ),
         },
         {
             "role": "user",
             "content": (
-                "Given this candidate profile and market analysis, provide a prioritized 90-day plan."
+                "Check whether this candidate is compatible with their target role."
+                "\nReturn: compatibility verdict, confidence (0-100), key strengths, key gaps, and next steps."
                 f"\nProfile: {json.dumps(profile)}"
-                f"\nInsights: {json.dumps(insights)}"
             ),
         },
     ]
@@ -187,22 +189,13 @@ def build_dashboard_response(
     trends = payload.get("trends") if isinstance(payload.get("trends"), dict) else {}
 
     warnings: list[str] = []
-    auto_fetch_market_data = bool(payload.get("auto_fetch_market_data", not jobs and not trends))
+    auto_fetch_market_data = bool(payload.get("auto_fetch_market_data", False))
     if auto_fetch_market_data:
-        fetched_jobs, fetched_trends, fetch_warnings = market_data_fetcher()
-        warnings.extend(fetch_warnings)
-        if not jobs:
-            jobs = fetched_jobs
-        if not trends:
-            trends = fetched_trends
+        warnings.append("Automatic market-data API fetching is disabled for compatibility-only analysis.")
 
     insights = generate_career_insights(profile=profile, jobs=jobs, trends=trends)
     response: dict[str, Any] = {
         "model": payload.get("model") or DEFAULT_GEMMA_MODEL,
-        "market_data_sources": {
-            "jobs": REMOTEOK_JOBS_URL,
-            "trends": STACKEXCHANGE_TAGS_URL,
-        },
         "market_data_summary": {
             "jobs_count": len(jobs),
             "trend_skills_count": len(trends.get("emerging_skills", {})) if isinstance(trends, dict) else 0,
@@ -218,7 +211,7 @@ def build_dashboard_response(
         if not hf_token:
             response["ai_error"] = "Missing Hugging Face token. Provide hf_token or set HF_TOKEN env variable."
         else:
-            messages = _build_ai_messages(profile, response["insights"])
+            messages = _build_ai_messages(profile)
             try:
                 response["ai_advice"] = chat_completion_fn(
                     messages=messages,
