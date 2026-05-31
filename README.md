@@ -4,8 +4,8 @@
 
 This repository includes a career intelligence platform that combines:
 - Candidate profile data (target role + current skills)
-- Job posting requirements (market demand)
-- Labor-market trend signals (emerging skills)
+- Open-web job posting requirements (market demand)
+- Open-web labor-market trend signals (emerging skills)
 - Optional Gemma 4 advisory output via Hugging Face chat completions
 
 ## Components
@@ -54,16 +54,15 @@ Open:
     "target_role": "Data Scientist",
     "skills": ["python", "sql", "statistics"]
   },
-  "jobs": [
-    {"title": "Senior Data Scientist", "skills": ["Python", "SQL", "MLOps", "ML"]}
-  ],
-  "trends": {
-    "emerging_skills": {"GenAI": 3, "MLOps": 2}
-  },
+  "auto_fetch_market_data": true,
   "include_ai": true,
   "model": "google/gemma-4-31B-it:novita"
 }
 ```
+
+When `auto_fetch_market_data` is true, the dashboard fetches:
+- Jobs from `https://remoteok.com/api`
+- Trend signals from `https://api.stackexchange.com/2.3/tags`
 
 ## Hugging Face curl reference
 
